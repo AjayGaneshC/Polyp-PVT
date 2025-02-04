@@ -14,8 +14,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 class PolyDetector:
-    def __init__(self, model, history_size=10, confidence_threshold=0.5, 
-                 stability_threshold=0.6, min_detection_area=100):
+    def __init__(self, model, history_size=5, confidence_threshold=0.3, 
+                 stability_threshold=0.4, min_detection_area=50):
         """
         Advanced Polyp Detection with Temporal Consistency
         
@@ -35,6 +35,9 @@ class PolyDetector:
         # Detection history
         self.bbox_history = deque(maxlen=history_size)
         self.confidence_history = deque(maxlen=history_size)
+        
+        # Debugging flag
+        self.debug = True
     
     def find_bounding_box(self, mask):
         """
@@ -53,6 +56,8 @@ class PolyDetector:
         valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > self.min_detection_area]
         
         if not valid_contours:
+            if self.debug:
+                print("No valid contours found")
             return None
         
         # Find the largest contour
@@ -60,6 +65,9 @@ class PolyDetector:
         
         # Get bounding rectangle
         x, y, w, h = cv2.boundingRect(largest_contour)
+        
+        if self.debug:
+            print(f"Bounding box found: x={x}, y={y}, w={w}, h={h}")
         
         return (x, y, w, h)
     
@@ -96,6 +104,9 @@ class PolyDetector:
         # Compute detection confidence
         detection_confidence = np.mean(pred) if bbox else 0
         
+        if self.debug:
+            print(f"Detection confidence: {detection_confidence}")
+        
         # Update history
         self.bbox_history.append(bbox)
         self.confidence_history.append(detection_confidence)
@@ -110,6 +121,11 @@ class PolyDetector:
             cv2.rectangle(output_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
             cv2.putText(output_frame, 'Polyp', (x, y-10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        elif bbox:  # If no stable bbox but a bbox was found in this frame
+            x, y, w, h = bbox
+            cv2.rectangle(output_frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+            cv2.putText(output_frame, 'Potential Polyp', (x, y-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
 
         return output_frame, stable_bbox is not None
     
@@ -122,21 +138,30 @@ class PolyDetector:
         """
         # If not enough history, return None
         if len(self.bbox_history) < self.history_size:
+            if self.debug:
+                print(f"Not enough history: {len(self.bbox_history)}")
             return None
         
         # Check confidence stability
         mean_confidence = np.mean(self.confidence_history)
         if mean_confidence < self.stability_threshold:
+            if self.debug:
+                print(f"Mean confidence too low: {mean_confidence}")
             return None
         
         # Compute average bounding box
         valid_bboxes = [bbox for bbox in self.bbox_history if bbox is not None]
         if not valid_bboxes:
+            if self.debug:
+                print("No valid bboxes in history")
             return None
         
         # Compute average bbox
         bboxes_array = np.array(valid_bboxes)
         avg_bbox = np.mean(bboxes_array, axis=0).astype(int)
+        
+        if self.debug:
+            print(f"Stable bbox found: {avg_bbox}")
         
         return tuple(avg_bbox)
 
@@ -145,9 +170,10 @@ def main():
     parser.add_argument('--video_path', type=str, required=True, help='Path to input video')
     parser.add_argument('--output_path', type=str, default='output_video.avi', help='Path to output video')
     parser.add_argument('--weights', type=str, default='99PolypPVT.pth', help='Path to model weights')
-    parser.add_argument('--confidence', type=float, default=0.5, help='Initial confidence threshold')
-    parser.add_argument('--history_size', type=int, default=10, help='Number of frames for temporal consistency')
-    parser.add_argument('--stability_threshold', type=float, default=0.6, help='Threshold for stable detection')
+    parser.add_argument('--confidence', type=float, default=0.3, help='Initial confidence threshold')
+    parser.add_argument('--history_size', type=int, default=5, help='Number of frames for temporal consistency')
+    parser.add_argument('--stability_threshold', type=float, default=0.4, help='Threshold for stable detection')
+    parser.add_argument('--min_area', type=int, default=50, help='Minimum detection area')
     args = parser.parse_args()
 
     # Load model
@@ -161,7 +187,8 @@ def main():
         model, 
         history_size=args.history_size, 
         confidence_threshold=args.confidence,
-        stability_threshold=args.stability_threshold
+        stability_threshold=args.stability_threshold,
+        min_detection_area=args.min_area
     )
 
     # Open video
