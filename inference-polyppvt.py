@@ -15,9 +15,10 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 class PolyDetector:
     def __init__(self, model, history_size=5, confidence_threshold=0.3, 
-                 stability_threshold=0.4, min_detection_area=50):
+                 stability_threshold=0.4, min_detection_area=50, 
+                 max_detection_area_ratio=0.3, aspect_ratio_range=(0.5, 2.0)):
         """
-        Advanced Polyp Detection with Temporal Consistency
+        Advanced Polyp Detection with Temporal Consistency and Shape Validation
         
         Args:
             model (torch.nn.Module): Trained polyp detection model
@@ -25,12 +26,16 @@ class PolyDetector:
             confidence_threshold (float): Initial confidence threshold
             stability_threshold (float): Threshold for consistent detection
             min_detection_area (int): Minimum area to consider a valid polyp
+            max_detection_area_ratio (float): Maximum area ratio relative to frame
+            aspect_ratio_range (tuple): Valid aspect ratio range for polyps
         """
         self.model = model
         self.history_size = history_size
         self.confidence_threshold = confidence_threshold
         self.stability_threshold = stability_threshold
         self.min_detection_area = min_detection_area
+        self.max_detection_area_ratio = max_detection_area_ratio
+        self.aspect_ratio_range = aspect_ratio_range
         
         # Detection history
         self.bbox_history = deque(maxlen=history_size)
@@ -39,12 +44,61 @@ class PolyDetector:
         # Debugging flag
         self.debug = True
     
-    def find_bounding_box(self, mask):
+    def validate_polyp_shape(self, contour, frame_shape):
         """
-        Find the bounding box of the largest connected component in the mask
+        Advanced shape validation for potential polyps
+        
+        Args:
+            contour (numpy.ndarray): Detected contour
+            frame_shape (tuple): Shape of the input frame
+        
+        Returns:
+            bool: Whether the contour meets polyp shape criteria
+        """
+        # Calculate contour area and frame area
+        contour_area = cv2.contourArea(contour)
+        frame_area = frame_shape[0] * frame_shape[1]
+        
+        # Area-based filtering
+        if contour_area < self.min_detection_area:
+            if self.debug:
+                print(f"Rejected: Area too small ({contour_area})")
+            return False
+        
+        # Prevent oversized detections
+        if contour_area > (frame_area * self.max_detection_area_ratio):
+            if self.debug:
+                print(f"Rejected: Area too large ({contour_area})")
+            return False
+        
+        # Compute bounding rectangle
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Aspect ratio check
+        aspect_ratio = max(w, h) / min(w, h)
+        if aspect_ratio < self.aspect_ratio_range[0] or aspect_ratio > self.aspect_ratio_range[1]:
+            if self.debug:
+                print(f"Rejected: Irregular aspect ratio ({aspect_ratio})")
+            return False
+        
+        # Convexity check
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        convexity_defect = 1 - (contour_area / hull_area)
+        if convexity_defect > 0.3:  # Allow some irregularity
+            if self.debug:
+                print(f"Rejected: Irregular shape (convexity defect: {convexity_defect})")
+            return False
+        
+        return True
+    
+    def find_bounding_box(self, mask, frame_shape):
+        """
+        Find the bounding box of the largest valid polyp-like component
         
         Args:
             mask (numpy.ndarray): Binary mask of the segmentation
+            frame_shape (tuple): Shape of the input frame
         
         Returns:
             tuple or None: (x, y, w, h) of the bounding box
@@ -52,22 +106,25 @@ class PolyDetector:
         # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Filter contours by area
-        valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > self.min_detection_area]
+        # Filter and validate contours
+        valid_contours = [
+            cnt for cnt in contours 
+            if self.validate_polyp_shape(cnt, frame_shape)
+        ]
         
         if not valid_contours:
             if self.debug:
-                print("No valid contours found")
+                print("No valid polyp-like contours found")
             return None
         
-        # Find the largest contour
+        # Find the largest valid contour
         largest_contour = max(valid_contours, key=cv2.contourArea)
         
         # Get bounding rectangle
         x, y, w, h = cv2.boundingRect(largest_contour)
         
         if self.debug:
-            print(f"Bounding box found: x={x}, y={y}, w={w}, h={h}")
+            print(f"Validated bounding box: x={x}, y={y}, w={w}, h={h}")
         
         return (x, y, w, h)
     
@@ -99,7 +156,7 @@ class PolyDetector:
         pred_mask = (pred > self.confidence_threshold).astype(np.uint8) * 255
 
         # Find bounding box
-        bbox = self.find_bounding_box(pred_mask)
+        bbox = self.find_bounding_box(pred_mask, frame.shape)
         
         # Compute detection confidence
         detection_confidence = np.mean(pred) if bbox else 0
@@ -174,6 +231,7 @@ def main():
     parser.add_argument('--history_size', type=int, default=5, help='Number of frames for temporal consistency')
     parser.add_argument('--stability_threshold', type=float, default=0.4, help='Threshold for stable detection')
     parser.add_argument('--min_area', type=int, default=50, help='Minimum detection area')
+    parser.add_argument('--max_area_ratio', type=float, default=0.3, help='Maximum area ratio relative to frame')
     args = parser.parse_args()
 
     # Load model
@@ -188,7 +246,8 @@ def main():
         history_size=args.history_size, 
         confidence_threshold=args.confidence,
         stability_threshold=args.stability_threshold,
-        min_detection_area=args.min_area
+        min_detection_area=args.min_area,
+        max_detection_area_ratio=args.max_area_ratio
     )
 
     # Open video
