@@ -8,6 +8,8 @@ import time
 from lib.pvt import PolypPVT
 import warnings
 from collections import deque
+import skimage.feature
+import skimage.color
 
 # Suppress specific warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -18,7 +20,7 @@ class PolyDetector:
                  stability_threshold=0.4, min_detection_area=50, 
                  max_detection_area_ratio=0.3, aspect_ratio_range=(0.5, 2.0)):
         """
-        Advanced Polyp Detection with Temporal Consistency and Shape Validation
+        Advanced Polyp Detection with Multi-Stage Filtering
         
         Args:
             model (torch.nn.Module): Trained polyp detection model
@@ -44,13 +46,52 @@ class PolyDetector:
         # Debugging flag
         self.debug = True
     
-    def validate_polyp_shape(self, contour, frame_shape):
+    def color_texture_analysis(self, frame, mask):
+        """
+        Advanced color and texture analysis for polyp detection
+        
+        Args:
+            frame (numpy.ndarray): Original frame
+            mask (numpy.ndarray): Binary mask of potential polyp region
+        
+        Returns:
+            bool: Whether the region is likely a polyp
+        """
+        # Extract region of interest
+        roi = cv2.bitwise_and(frame, frame, mask=mask)
+        
+        # Convert to LAB color space for better color analysis
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        
+        # Color-based features
+        l, a, b = cv2.split(lab)
+        
+        # Texture analysis using Local Binary Patterns
+        gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        lbp = skimage.feature.local_binary_pattern(gray_roi, P=8, R=1, method='uniform')
+        
+        # Compute color and texture statistics
+        color_std = np.std([a, b])  # Color variation
+        texture_entropy = skimage.feature.shannon_entropy(lbp)
+        
+        # Polyp-specific criteria
+        color_criteria = 0.3 < color_std < 0.8  # Moderate color variation
+        texture_criteria = 2.0 < texture_entropy < 4.0  # Specific texture complexity
+        
+        if self.debug:
+            print(f"Color Std: {color_std}, Texture Entropy: {texture_entropy}")
+            print(f"Color Match: {color_criteria}, Texture Match: {texture_criteria}")
+        
+        return color_criteria and texture_criteria
+    
+    def validate_polyp_shape(self, contour, frame_shape, frame):
         """
         Advanced shape validation for potential polyps
         
         Args:
             contour (numpy.ndarray): Detected contour
             frame_shape (tuple): Shape of the input frame
+            frame (numpy.ndarray): Original frame
         
         Returns:
             bool: Whether the contour meets polyp shape criteria
@@ -74,6 +115,16 @@ class PolyDetector:
         # Compute bounding rectangle
         x, y, w, h = cv2.boundingRect(contour)
         
+        # Create mask for the contour
+        mask = np.zeros(frame_shape[:2], dtype=np.uint8)
+        cv2.drawContours(mask, [contour], -1, 255, -1)
+        
+        # Color and texture analysis
+        if not self.color_texture_analysis(frame, mask):
+            if self.debug:
+                print("Rejected: Failed color/texture analysis")
+            return False
+        
         # Aspect ratio check
         aspect_ratio = max(w, h) / min(w, h)
         if aspect_ratio < self.aspect_ratio_range[0] or aspect_ratio > self.aspect_ratio_range[1]:
@@ -92,13 +143,13 @@ class PolyDetector:
         
         return True
     
-    def find_bounding_box(self, mask, frame_shape):
+    def find_bounding_box(self, mask, frame):
         """
         Find the bounding box of the largest valid polyp-like component
         
         Args:
             mask (numpy.ndarray): Binary mask of the segmentation
-            frame_shape (tuple): Shape of the input frame
+            frame (numpy.ndarray): Original frame
         
         Returns:
             tuple or None: (x, y, w, h) of the bounding box
@@ -109,7 +160,7 @@ class PolyDetector:
         # Filter and validate contours
         valid_contours = [
             cnt for cnt in contours 
-            if self.validate_polyp_shape(cnt, frame_shape)
+            if self.validate_polyp_shape(cnt, frame.shape, frame)
         ]
         
         if not valid_contours:
@@ -156,7 +207,7 @@ class PolyDetector:
         pred_mask = (pred > self.confidence_threshold).astype(np.uint8) * 255
 
         # Find bounding box
-        bbox = self.find_bounding_box(pred_mask, frame.shape)
+        bbox = self.find_bounding_box(pred_mask, frame)
         
         # Compute detection confidence
         detection_confidence = np.mean(pred) if bbox else 0
